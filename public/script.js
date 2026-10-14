@@ -1,3 +1,31 @@
+async function request(path, options = {}) {
+  const response = await fetch(path, options);
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error || `Request failed (${response.status})`);
+  }
+
+  return data;
+}
+
+const store = {
+  list: () => request('/api/projects'),
+  create: project => request('/api/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(project)
+  }),
+  update: (id, project) => request(`/api/projects/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(project)
+  }),
+  remove: id => request(`/api/projects/${encodeURIComponent(id)}`, {
+    method: 'DELETE'
+  })
+};
+
 const form = document.querySelector('#project-form');
 const nameInput = document.querySelector('#name');
 const statusInput = document.querySelector('#status');
@@ -7,91 +35,22 @@ const projectList = document.querySelector('#project-list');
 const emptyState = document.querySelector('#empty-state');
 const message = document.querySelector('#message');
 
-const storageKey = 'workshop-projects-v1';
-const projects = [];
 let editingId = null;
-let storageWritable = true;
+let busy = false;
 
-function showMessage(text) {
-  if (message) {
-    message.textContent = text;
-  }
+function showMessage(text, isError = false) {
+  message.textContent = text;
+  message.dataset.error = String(isError);
 }
 
-function isValidProjectArray(value) {
-  if (!Array.isArray(value)) {
-    return false;
-  }
-
-  const ids = new Set();
-
-  return value.every(project => {
-    if (
-      project === null ||
-      typeof project !== 'object' ||
-      typeof project.id !== 'string' ||
-      project.id.trim() === '' ||
-      typeof project.name !== 'string' ||
-      project.name.trim() === '' ||
-      typeof project.status !== 'string' ||
-      ids.has(project.id)
-    ) {
-      return false;
-    }
-
-    ids.add(project.id);
-    return true;
+function setBusy(value) {
+  busy = value;
+  form.querySelectorAll('input, select, button').forEach(control => {
+    control.disabled = value;
   });
-}
-
-function loadProjects() {
-  let storedText;
-
-  try {
-    storedText = localStorage.getItem(storageKey);
-  } catch {
-    storageWritable = false;
-    showMessage('Projects could not be read from browser storage.');
-    return;
-  }
-
-  if (storedText === null) {
-    return;
-  }
-
-  try {
-    const storedProjects = JSON.parse(storedText);
-
-    if (!isValidProjectArray(storedProjects)) {
-      storageWritable = false;
-      showMessage(
-        'Saved project data is invalid. It was left unchanged, and changes in this session cannot be saved.'
-      );
-      return;
-    }
-
-    projects.push(...storedProjects);
-  } catch {
-    storageWritable = false;
-    showMessage(
-      'Saved project data could not be read. It was left unchanged, and changes in this session cannot be saved.'
-    );
-  }
-}
-
-function saveProjects() {
-  if (!storageWritable) {
-    showMessage('Project changes could not be saved to browser storage.');
-    return;
-  }
-
-  try {
-    const projectsText = JSON.stringify(projects);
-    localStorage.setItem(storageKey, projectsText);
-    showMessage('');
-  } catch {
-    showMessage('Project changes could not be saved to browser storage.');
-  }
+  projectList.querySelectorAll('button').forEach(button => {
+    button.disabled = value;
+  });
 }
 
 function setAddMode() {
@@ -102,10 +61,8 @@ function setAddMode() {
   cancelButton.hidden = true;
 }
 
-function startEditing(id) {
-  const project = projects.find(item => item.id === id);
-
-  if (!project) {
+function startEditing(project) {
+  if (busy) {
     return;
   }
 
@@ -113,36 +70,12 @@ function startEditing(id) {
   nameInput.value = project.name;
   statusInput.value = project.status;
   saveButton.textContent = 'Save changes';
-  cancelButton.textContent = 'Cancel edit';
   cancelButton.hidden = false;
   nameInput.focus();
 }
 
-function deleteProject(id) {
-  const project = projects.find(item => item.id === id);
-
-  if (!project) {
-    return;
-  }
-
-  const confirmed = window.confirm(`Delete "${project.name}"?`);
-
-  if (!confirmed) {
-    return;
-  }
-
-  if (editingId === id) {
-    setAddMode();
-  }
-
-  const remainingProjects = projects.filter(item => item.id !== id);
-  projects.splice(0, projects.length, ...remainingProjects);
-
-  saveProjects();
-  renderProjects();
-}
-
-function renderProjects() {
+async function refreshProjects() {
+  const projects = await store.list();
   projectList.replaceChildren();
 
   for (const project of projects) {
@@ -155,60 +88,83 @@ function renderProjects() {
 
     editButton.type = 'button';
     editButton.textContent = 'Edit';
-    editButton.addEventListener('click', () => {
-      startEditing(project.id);
-    });
+    editButton.setAttribute('aria-label', `Edit ${project.name}`);
+    editButton.addEventListener('click', () => startEditing(project));
 
     deleteButton.type = 'button';
     deleteButton.textContent = 'Delete';
-    deleteButton.addEventListener('click', () => {
-      deleteProject(project.id);
+    deleteButton.setAttribute('aria-label', `Delete ${project.name}`);
+    deleteButton.addEventListener('click', async () => {
+      if (busy || !window.confirm(`Delete "${project.name}"?`)) {
+        return;
+      }
+
+      setBusy(true);
+      showMessage('Deleting project...');
+
+      try {
+        await store.remove(project.id);
+        if (editingId === project.id) {
+          setAddMode();
+        }
+        await refreshProjects();
+        showMessage('Project deleted.');
+      } catch (error) {
+        showMessage(`${error.message} Check that the server is running.`, true);
+      } finally {
+        setBusy(false);
+      }
     });
 
     item.append(details, ' ', editButton, ' ', deleteButton);
     projectList.append(item);
   }
 
-  if (emptyState) {
-    emptyState.hidden = projects.length > 0;
-    emptyState.textContent = projects.length === 0 ? 'No projects yet.' : '';
-  }
+  emptyState.hidden = projects.length > 0;
 }
 
-form.addEventListener('submit', event => {
+form.addEventListener('submit', async event => {
   event.preventDefault();
 
-  const name = nameInput.value.trim();
-  const status = statusInput.value;
+  if (busy) {
+    return;
+  }
 
-  if (name === '') {
-    nameInput.value = '';
+  const project = {
+    name: nameInput.value.trim(),
+    status: statusInput.value
+  };
+
+  if (!project.name) {
     nameInput.reportValidity();
     return;
   }
 
-  if (editingId === null) {
-    projects.push({
-      id: crypto.randomUUID(),
-      name,
-      status
-    });
-  } else {
-    const project = projects.find(item => item.id === editingId);
+  setBusy(true);
+  showMessage('Saving project...');
 
-    if (project) {
-      project.name = name;
-      project.status = status;
+  try {
+    if (editingId === null) {
+      await store.create(project);
+    } else {
+      await store.update(editingId, project);
     }
-  }
 
-  saveProjects();
-  renderProjects();
-  setAddMode();
+    setAddMode();
+    await refreshProjects();
+    showMessage('Project saved.');
+  } catch (error) {
+    showMessage(`${error.message} Check that the server is running.`, true);
+  } finally {
+    setBusy(false);
+  }
 });
 
 cancelButton.addEventListener('click', setAddMode);
 
-loadProjects();
-setAddMode();
-renderProjects();
+setBusy(true);
+showMessage('Loading projects...');
+refreshProjects()
+  .then(() => showMessage('Ready.'))
+  .catch(error => showMessage(`${error.message} Check that the server is running.`, true))
+  .finally(() => setBusy(false));

@@ -4,6 +4,7 @@ import {
   createProject,
   deleteProject,
   listProjects,
+  ProjectValidationError,
   updateProject
 } from './database.js';
 
@@ -24,7 +25,11 @@ app.post('/api/projects', (req, res) => {
     const project = createProject(req.body ?? {});
     res.status(201).json(project);
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    if (error instanceof ProjectValidationError) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    throw error;
   }
 });
 
@@ -38,7 +43,11 @@ app.put('/api/projects/:id', (req, res) => {
 
     res.json(project);
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    if (error instanceof ProjectValidationError) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    throw error;
   }
 });
 
@@ -49,7 +58,7 @@ app.delete('/api/projects/:id', (req, res) => {
     return res.status(404).json({ error: 'Project not found.' });
   }
 
-  res.status(204).send();
+  res.json({ deleted: true });
 });
 
 app.use(express.static('public'));

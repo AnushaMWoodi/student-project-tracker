@@ -1,88 +1,88 @@
+import { randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+
+const databasePath = process.env.DB_FILE || 'data/projects.db';
+
+if (databasePath !== ':memory:') {
+  mkdirSync(dirname(resolve(databasePath)), { recursive: true });
+}
+
+const connection = new DatabaseSync(databasePath);
 const validStatuses = new Set(['Planned', 'In Progress', 'Completed']);
-const projects = [];
 
-function normalizeName(value) {
-  return typeof value === 'string' ? value.trim() : '';
-}
+connection.exec(`CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 80),
+  status TEXT NOT NULL CHECK(status IN ('Planned', 'In Progress', 'Completed'))
+)`);
 
-function isValidName(value) {
-  return value.length > 0 && value.length <= 80;
-}
+export class ProjectValidationError extends Error {}
 
-function normalizeStatus(value) {
-  return typeof value === 'string' ? value.trim() : '';
-}
+function validateProject(rawProject, currentProject = {}) {
+  if (rawProject === null || typeof rawProject !== 'object' || Array.isArray(rawProject)) {
+    throw new ProjectValidationError('Project data must be an object.');
+  }
 
-function isValidStatus(value) {
-  return typeof value === 'string' && validStatuses.has(value.trim());
+  const nameValue = rawProject.name ?? currentProject.name;
+  const statusValue = rawProject.status ?? currentProject.status;
+  const name = typeof nameValue === 'string' ? nameValue.trim() : '';
+  const status = typeof statusValue === 'string' ? statusValue.trim() : '';
+
+  if (name.length === 0 || name.length > 80) {
+    throw new ProjectValidationError('Project name is required and must be 1-80 characters long.');
+  }
+
+  if (!validStatuses.has(status)) {
+    throw new ProjectValidationError('Project status must be Planned, In Progress, or Completed.');
+  }
+
+  return { name, status };
 }
 
 export function resetProjects() {
-  projects.splice(0, projects.length);
+  connection.exec('DELETE FROM projects');
 }
 
 export function listProjects() {
-  return projects.map(project => ({ ...project }));
+  return connection.prepare(
+    'SELECT id, name, status FROM projects ORDER BY rowid DESC'
+  ).all();
 }
 
 export function createProject(rawProject = {}) {
-  const name = normalizeName(rawProject.name);
+  const project = validateProject(rawProject);
+  const id = randomUUID();
 
-  if (!isValidName(name)) {
-    throw new Error('Project name is required and must be 1-80 characters long.');
-  }
+  connection.prepare(
+    'INSERT INTO projects (id, name, status) VALUES (?, ?, ?)'
+  ).run(id, project.name, project.status);
 
-  const status = normalizeStatus(rawProject.status);
-
-  if (!isValidStatus(status)) {
-    throw new Error('Project status must be Planned, In Progress, or Completed.');
-  }
-
-  const project = {
-    id: crypto.randomUUID(),
-    name,
-    status
-  };
-
-  projects.push(project);
-  return { ...project };
+  return { id, ...project };
 }
 
 export function updateProject(id, rawProject = {}) {
-  const index = projects.findIndex(project => project.id === id);
+  const currentProject = connection.prepare(
+    'SELECT id, name, status FROM projects WHERE id = ?'
+  ).get(id);
 
-  if (index === -1) {
+  if (!currentProject) {
     return null;
   }
 
-  const nextName = normalizeName(rawProject.name ?? projects[index].name);
-  const nextStatus = normalizeStatus(rawProject.status ?? projects[index].status);
+  const project = validateProject(rawProject, currentProject);
+  connection.prepare(
+    'UPDATE projects SET name = ?, status = ? WHERE id = ?'
+  ).run(project.name, project.status, id);
 
-  if (!isValidName(nextName)) {
-    throw new Error('Project name is required and must be 1-80 characters long.');
-  }
-
-  if (!isValidStatus(nextStatus)) {
-    throw new Error('Project status must be Planned, In Progress, or Completed.');
-  }
-
-  const updatedProject = {
-    ...projects[index],
-    name: nextName,
-    status: nextStatus
-  };
-
-  projects[index] = updatedProject;
-  return { ...updatedProject };
+  return { id, ...project };
 }
 
 export function deleteProject(id) {
-  const index = projects.findIndex(project => project.id === id);
+  return connection.prepare('DELETE FROM projects WHERE id = ?').run(id).changes > 0;
+}
 
-  if (index === -1) {
-    return false;
-  }
-
-  projects.splice(index, 1);
-  return true;
+export function closeDatabase() {
+  connection.close();
 }

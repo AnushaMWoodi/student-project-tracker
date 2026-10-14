@@ -1,11 +1,27 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import app from '../app.js';
-import { resetProjects } from '../database.js';
+const testDirectory = mkdtempSync(join(tmpdir(), 'student-project-tracker-'));
+const testDatabasePath = join(testDirectory, 'projects.db');
+process.env.DB_FILE = testDatabasePath;
 
-async function withServer(fn) {
-  resetProjects();
+const { default: app } = await import('../app.js');
+const { closeDatabase, resetProjects } = await import('../database.js');
+
+after(() => {
+  closeDatabase();
+  rmSync(testDirectory, { recursive: true, force: true });
+});
+
+async function withServer(fn, { reset = true } = {}) {
+  if (reset) {
+    resetProjects();
+  }
+
   const server = app.listen(0);
 
   try {
@@ -16,7 +32,9 @@ async function withServer(fn) {
 
     await fn(address.port);
   } finally {
-    await new Promise(resolve => server.close(resolve));
+    await new Promise((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+    });
   }
 }
 
@@ -37,7 +55,7 @@ test('POST /api/projects creates a project and returns it', async () => {
   });
 });
 
-test('GET /api/projects returns the saved project list', async () => {
+test('GET /api/projects returns saved projects', async () => {
   await withServer(async port => {
     const createResponse = await fetch(`http://127.0.0.1:${port}/api/projects`, {
       method: 'POST',
@@ -51,8 +69,8 @@ test('GET /api/projects returns the saved project list', async () => {
     assert.equal(listResponse.status, 200);
 
     const list = await listResponse.json();
-    assert.ok(Array.isArray(list));
-    assert.ok(list.some(item => item.name === 'Tracker'));
+    assert.equal(list.length, 1);
+    assert.equal(list[0].name, 'Tracker');
   });
 });
 
@@ -65,7 +83,6 @@ test('PUT /api/projects/:id updates an existing project', async () => {
     });
 
     const created = await createResponse.json();
-
     const updateResponse = await fetch(`http://127.0.0.1:${port}/api/projects/${created.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -80,7 +97,7 @@ test('PUT /api/projects/:id updates an existing project', async () => {
   });
 });
 
-test('DELETE /api/projects/:id removes an item and returns 204', async () => {
+test('DELETE /api/projects/:id removes a project and returns 200', async () => {
   await withServer(async port => {
     const createResponse = await fetch(`http://127.0.0.1:${port}/api/projects`, {
       method: 'POST',
@@ -89,12 +106,15 @@ test('DELETE /api/projects/:id removes an item and returns 204', async () => {
     });
 
     const created = await createResponse.json();
-
     const deleteResponse = await fetch(`http://127.0.0.1:${port}/api/projects/${created.id}`, {
       method: 'DELETE'
     });
 
-    assert.equal(deleteResponse.status, 204);
+    assert.equal(deleteResponse.status, 200);
+    assert.deepEqual(await deleteResponse.json(), { deleted: true });
+
+    const listResponse = await fetch(`http://127.0.0.1:${port}/api/projects`);
+    assert.deepEqual(await listResponse.json(), []);
   });
 });
 
@@ -107,5 +127,38 @@ test('POST /api/projects rejects invalid project data', async () => {
     });
 
     assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /Project name/);
   });
+});
+
+test('SQLite data survives a server restart', async () => {
+  let createdProject;
+
+  await withServer(async port => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Persistent Monitor', status: 'In Progress' })
+    });
+    assert.equal(response.status, 201);
+    createdProject = await response.json();
+  });
+
+  await withServer(async port => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/projects`);
+    assert.equal(response.status, 200);
+
+    const projects = await response.json();
+    assert.deepEqual(projects, [createdProject]);
+  }, { reset: false });
+
+  const inspection = new DatabaseSync(testDatabasePath);
+  try {
+    const storedProject = inspection.prepare(
+      'SELECT id, name, status FROM projects WHERE id = ?'
+    ).get(createdProject.id);
+    assert.deepEqual({ ...storedProject }, createdProject);
+  } finally {
+    inspection.close();
+  }
 });
