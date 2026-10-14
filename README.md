@@ -42,7 +42,7 @@ Project names are required and limited to 80 characters. Status must be `Planned
 
 ## Verification evidence
 
-Run `npm.cmd test` for automated API coverage of create, list, update, delete, invalid input, and project persistence across a server restart. The persistence test also reads the stored SQLite row directly. A browser smoke check verified creating, editing, and deleting a project through the UI. The automated tests use a temporary database and do not clear or alter the normal `data/projects.db`.
+Run `npm.cmd test` for automated API coverage of create, list, update, delete, invalid input, and project persistence across a server restart. The persistence test also reads the stored SQLite row directly. A browser acceptance check created `IoT Monitor`, edited it to `Completed`, deleted a separate test project, and confirmed that cancelling another delete kept its project. A read-only SQLite query showed `IoT Monitor` with status `Completed`; after a server restart, the UI still displayed it. Stopping the server produced a visible save error, and the app returned to `Ready` after restart. These manual checks used a temporary database. The automated tests also use a temporary database and do not clear or alter the normal `data/projects.db`.
 
 ## Demo limitations
 
